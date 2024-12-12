@@ -4,9 +4,7 @@
   "description": "",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "ts-node src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "stage": "tsc && git status && git add ."
   },
   "keywords": [],
   "author": "",
