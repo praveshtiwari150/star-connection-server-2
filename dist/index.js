@@ -22,12 +22,11 @@ const server = app.listen(PORT, () => {
     console.log(`App is listening on port ${PORT}`);
 });
 const wss = new ws_1.WebSocketServer({ server });
-let count = 0;
 const emailToSessionId = new Map();
 const sessionHosts = new Map();
 let peers = new Map();
 wss.on('connection', (ws) => {
-    ws.on('error', console.error);
+    ws.on('error', (err) => console.log(err));
     ws.on('message', (data) => {
         const message = JSON.parse(data.toString());
         switch (message.type) {
@@ -45,8 +44,21 @@ wss.on('connection', (ws) => {
                 break;
             case 'ice-candidate':
                 shareIceCandidate(ws, message);
+                break;
+            case 'offer':
+                sendOffer(ws, message);
+                break;
             case 'answer':
                 sendAnswer(ws, message);
+                break;
+            case 'live-chat':
+                handleChat(ws, message);
+                break;
+            case 'stop-screen-stream':
+                stopScreenShare(ws, message);
+                break;
+            case 'close-connection':
+                handleSocketConnection(ws, message);
         }
     });
     ws.on('close', () => {
@@ -66,49 +78,38 @@ function handleCreateMeeting(ws, message) {
     const sessionId = (0, uuid_1.v4)();
     emailToSessionId.set(email, { sessionId, meetingStarted: true });
     sessionHosts.set(sessionId, ws);
-    console.log("Meeting created, Session ID: ", sessionId);
     ws.send(JSON.stringify({ type: 'meeting-created', email, sessionId }));
 }
 function handleJoinMeeting(ws, message) {
     var _a;
     const { peerName, sessionId } = message;
-    console.log(`Peer ${peerName} made request to join session ${sessionId}`);
     const session = Array.from(emailToSessionId.values())
         .find(s => s.sessionId === sessionId);
-    console.log(session);
     if (!session) {
         console.log("Invalid session ID");
         ws.send(JSON.stringify({ type: 'invalid-sessionid' }));
         return;
     }
     if (!session.meetingStarted) {
-        console.log("Meeting has not started yet");
         ws.send(JSON.stringify({ type: 'meeting-not-started' }));
         return;
     }
     let peersList = peers.get(sessionId) || [];
     const peerId = (0, uuid_1.v4)();
-    console.log("peerId created ", peerId);
     peersList.push({ peerId, peerName, ws, status: 'pending' });
     peers.set(sessionId, peersList);
-    console.log(peers);
     (_a = sessionHosts.get(sessionId)) === null || _a === void 0 ? void 0 : _a.send(JSON.stringify({ type: 'join-request', peerId, peerName }));
 }
 function notifyParticipantandUpdateStatus(ws, message) {
     const { peerId, sessionId, sdp } = message;
-    console.log("------------------------------------------participant-added---------------------");
     const peersList = peers.get(sessionId);
     if (peersList) {
         const peer = peersList.find(p => p.peerId === peerId);
         if (peer) {
             peer.status = 'accepted';
-            console.log(`Peer ${peer.peerName} has been accepted into session ${sessionId}`);
-            // console.log(peers); //only for debugging
             peer.ws.send(JSON.stringify({ type: 'participant-added', peerId, sdp }));
-            console.log("Informed participant that the request has been accepted");
         }
     }
-    console.log("--------------------------------------------participant-added-ends-----------------");
 }
 function notifyParticipantandRemovePeer(ws, message) {
     const { peerId, sessionId } = message;
@@ -117,35 +118,36 @@ function notifyParticipantandRemovePeer(ws, message) {
         const peer = peerList === null || peerList === void 0 ? void 0 : peerList.find(p => p.peerId === peerId);
         const updatedPeersList = peerList === null || peerList === void 0 ? void 0 : peerList.filter(p => p.peerId !== peerId);
         peers.set(sessionId, updatedPeersList);
-        console.log(`Host has not allowed ${peer === null || peer === void 0 ? void 0 : peer.peerName} to ${sessionId}: `);
         peer === null || peer === void 0 ? void 0 : peer.ws.send(JSON.stringify({ type: 'participant-rejected' }));
-    }
-}
-function sendOfferToParticipant(ws, message) {
-    const { type, sessionId, peerId, sdp } = message;
-    const peerList = peers.get(sessionId);
-    if (peerList) {
-        const peer = peerList.find(p => p.peerId === peerId);
-        peer === null || peer === void 0 ? void 0 : peer.ws.send(JSON.stringify({ type, peerId, sdp }));
     }
 }
 function shareIceCandidate(ws, message) {
     const { type, candidate, sessionId, peerId } = message;
-    console.log("-----------------------------sharing-icecandidate--------------------------");
     if (ws === sessionHosts.get(sessionId)) {
         const peerList = peers.get(sessionId);
         if (peerList) {
-            console.log("Host sent the ice-candidate to the peer");
             const peer = peerList.find(p => p.peerId === peerId);
             peer === null || peer === void 0 ? void 0 : peer.ws.send(JSON.stringify({ type, candidate, peerId }));
         }
     }
     else {
-        console.log("Peer sent ice-candidate to the host");
         const host = sessionHosts.get(sessionId);
         host === null || host === void 0 ? void 0 : host.send(JSON.stringify({ type: 'ice-candidate', candidate, peerId }));
     }
-    console.log("------------------------ice-candidate-------------------------");
+}
+function sendOffer(ws, message) {
+    const { type, peerId, sessionId, sdp } = message;
+    const peerList = peers.get(sessionId);
+    if (peerList) {
+        const peer = peerList.find(p => p.peerId === peerId);
+        if (peer) {
+            peer.ws.send(JSON.stringify({
+                type: type,
+                peerId: peerId,
+                sdp: sdp,
+            }));
+        }
+    }
 }
 function sendAnswer(ws, message) {
     const { type, peerId, sessionId, sdp } = message;
@@ -153,10 +155,89 @@ function sendAnswer(ws, message) {
     if (peerList) {
         const peer = peerList.find(p => p.peerId === peerId);
         if (ws === (peer === null || peer === void 0 ? void 0 : peer.ws)) {
-            console.log(`${peer.peerName} is sending answer to host`);
             const host = sessionHosts.get(sessionId);
             host === null || host === void 0 ? void 0 : host.send(JSON.stringify({ type, peerId, sessionId, sdp }));
+            if (!host) {
+                console.log('Host socket not found');
+            }
         }
+    }
+}
+function handleChat(ws, message) {
+    const { type, text, sessionId, name, peerId, timestamp } = message;
+    console.log(message);
+    const host = sessionHosts.get(sessionId);
+    host === null || host === void 0 ? void 0 : host.send(JSON.stringify({
+        type,
+        text,
+        name,
+        timestamp,
+        peerId,
+        sessionId
+    }));
+    const peerList = peers.get(sessionId);
+    peerList === null || peerList === void 0 ? void 0 : peerList.forEach(peer => {
+        peer.ws.send(JSON.stringify({
+            type,
+            text,
+            name,
+            peerId,
+            sessionId,
+            timestamp
+        }));
+    });
+}
+function stopScreenShare(ws, message) {
+    const { type, trackId, sessionId } = message;
+    const peerList = peers.get(sessionId);
+    if (!peerList)
+        return;
+    peerList.forEach(peer => {
+        peer.ws.send(JSON.stringify({
+            type,
+            trackId,
+            sessionId
+        }));
+    });
+}
+function handleSocketConnection(ws, message) {
+    if (message.from === 'peer') {
+        const { type, peerId, sessionId } = message;
+        let peerList = peers.get(sessionId);
+        if (!peerList)
+            return;
+        const peer = peerList === null || peerList === void 0 ? void 0 : peerList.find(p => p.peerId === peerId);
+        peer === null || peer === void 0 ? void 0 : peer.ws.close();
+        peerList = peerList.filter(peer => peer.peerId !== peerId);
+        if (peerList.length > 0) {
+            peers.set(sessionId, peerList);
+        }
+        else {
+            peers.delete(sessionId);
+        }
+        const host = sessionHosts.get(sessionId);
+        host === null || host === void 0 ? void 0 : host.send(JSON.stringify({
+            type,
+            peerId,
+            sessionId
+        }));
+    }
+    if (message.from === 'host') {
+        const { sessionId } = message;
+        const peerList = peers.get(sessionId);
+        peerList === null || peerList === void 0 ? void 0 : peerList.forEach(peer => {
+            const { type, peerId, sessionId } = message;
+            peer.ws.send(JSON.stringify({
+                type,
+                peerId,
+                sessionId
+            }));
+            peer.ws.close();
+        });
+        peers.delete(sessionId);
+        const host = sessionHosts.get(sessionId);
+        host === null || host === void 0 ? void 0 : host.close();
+        sessionHosts.delete(sessionId);
     }
 }
 //# sourceMappingURL=index.js.map

@@ -1,4 +1,4 @@
-import express, {Request, Response} from "express";
+import express, { Request, Response } from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import { v4 as uuid } from 'uuid';
@@ -35,13 +35,12 @@ const server = app.listen(PORT, () => {
 });
 
 const wss = new WebSocketServer({ server });
-let count = 0;
 const emailToSessionId: Map<string, Session> = new Map();
 const sessionHosts = new Map<string, WebSocket>();
 let peers: Map<string, Peer[]> = new Map();
 
 wss.on('connection', (ws) => {
-    ws.on('error', console.error);
+    ws.on('error', (err) => console.log(err));
 
 
     ws.on('message', (data) => {
@@ -63,12 +62,28 @@ wss.on('connection', (ws) => {
                 notifyParticipantandRemovePeer(ws, message);
                 break;
 
-                
+
             case 'ice-candidate':
                 shareIceCandidate(ws, message);
+                break;
+
+            case 'offer':
+                sendOffer(ws, message);
+                break;
 
             case 'answer':
                 sendAnswer(ws, message);
+                break;
+
+            case 'live-chat':
+                handleChat(ws, message);
+                break;
+            case 'stop-screen-stream':
+                stopScreenShare(ws, message);
+                break;
+
+            case 'close-connection':
+                handleSocketConnection(ws, message);
         }
     });
 
@@ -91,18 +106,15 @@ function handleCreateMeeting(ws: WebSocket, message: any) {
     const sessionId = uuid();
     emailToSessionId.set(email, { sessionId, meetingStarted: true });
     sessionHosts.set(sessionId, ws);
-    console.log("Meeting created, Session ID: ", sessionId);
     ws.send(JSON.stringify({ type: 'meeting-created', email, sessionId }));
 }
 
 
 function handleJoinMeeting(ws: WebSocket, message: any) {
     const { peerName, sessionId } = message;
-    console.log(`Peer ${peerName} made request to join session ${sessionId}`);
 
     const session = Array.from(emailToSessionId.values())
         .find(s => s.sessionId === sessionId);
-    console.log(session);
 
     if (!session) {
         console.log("Invalid session ID");
@@ -111,83 +123,73 @@ function handleJoinMeeting(ws: WebSocket, message: any) {
     }
 
     if (!session.meetingStarted) {
-        console.log("Meeting has not started yet");
         ws.send(JSON.stringify({ type: 'meeting-not-started' }));
         return;
     }
 
     let peersList = peers.get(sessionId) || [];
     const peerId = uuid();
-    console.log("peerId created ", peerId);
     peersList.push({ peerId, peerName, ws, status: 'pending' });
     peers.set(sessionId, peersList);
-    console.log(peers);
-    sessionHosts.get(sessionId)?.send(JSON.stringify({ type: 'join-request',peerId, peerName }));
+    sessionHosts.get(sessionId)?.send(JSON.stringify({ type: 'join-request', peerId, peerName }));
 }
 
 function notifyParticipantandUpdateStatus(ws: WebSocket, message: any) {
     const { peerId, sessionId, sdp } = message;
-    console.log("------------------------------------------participant-added---------------------")
     const peersList = peers.get(sessionId);
-        if (peersList) {
-            const peer = peersList.find(p => p.peerId === peerId);
-            if (peer) {
-                peer.status = 'accepted';
-                console.log(`Peer ${peer.peerName} has been accepted into session ${sessionId}`);
-                // console.log(peers); //only for debugging
-                peer.ws.send(JSON.stringify({ type: 'participant-added', peerId, sdp }));
-                console.log("Informed participant that the request has been accepted");
-            }
+    if (peersList) {
+        const peer = peersList.find(p => p.peerId === peerId);
+        if (peer) {
+            peer.status = 'accepted';
+            peer.ws.send(JSON.stringify({ type: 'participant-added', peerId, sdp }));
+        }
     }
-    
-    console.log("--------------------------------------------participant-added-ends-----------------")
 }
 
 function notifyParticipantandRemovePeer(ws: WebSocket, message: any) {
     const { peerId, sessionId } = message;
-    
-    const peerList = peers.get(sessionId);
-        if (peerList) {
-            const peer = peerList?.find(p => p.peerId === peerId);
-            const updatedPeersList = peerList?.filter(p => p.peerId !== peerId);
-            peers.set(sessionId, updatedPeersList);
-            console.log(`Host has not allowed ${peer?.peerName} to ${sessionId}: `)
-            peer?.ws.send(JSON.stringify({ type: 'participant-rejected' }));
-        }
-    
-}
 
-function sendOfferToParticipant(ws: WebSocket, message: any) {
-    const {type, sessionId, peerId, sdp } = message;
     const peerList = peers.get(sessionId);
-
     if (peerList) {
-        const peer = peerList.find(p => p.peerId === peerId);
-        peer?.ws.send(JSON.stringify({ type, peerId, sdp }));
+        const peer = peerList?.find(p => p.peerId === peerId);
+        const updatedPeersList = peerList?.filter(p => p.peerId !== peerId);
+        peers.set(sessionId, updatedPeersList);
+        peer?.ws.send(JSON.stringify({ type: 'participant-rejected' }));
     }
+
 }
 
 function shareIceCandidate(ws: WebSocket, message: any) {
     const { type, candidate, sessionId, peerId } = message;
 
-    console.log("-----------------------------sharing-icecandidate--------------------------")
     if (ws === sessionHosts.get(sessionId)) {
         const peerList = peers.get(sessionId);
         if (peerList) {
-            console.log("Host sent the ice-candidate to the peer")
             const peer = peerList.find(p => p.peerId === peerId);
             peer?.ws.send(JSON.stringify({ type, candidate, peerId }));
         }
     }
 
     else {
-        console.log("Peer sent ice-candidate to the host");
         const host = sessionHosts.get(sessionId);
-        host?.send(JSON.stringify({type:'ice-candidate', candidate, peerId}))
+        host?.send(JSON.stringify({ type: 'ice-candidate', candidate, peerId }))
     }
+}
 
-    console.log("------------------------ice-candidate-------------------------")
+function sendOffer(ws: WebSocket, message: any) {
+    const { type, peerId, sessionId, sdp } = message
+    const peerList = peers.get(sessionId);
 
+    if (peerList) {
+        const peer = peerList.find(p => p.peerId === peerId)
+        if (peer) {
+            peer.ws.send(JSON.stringify({
+                type: type,
+                peerId: peerId,
+                sdp: sdp,
+            }));
+        }
+    }
 }
 
 function sendAnswer(ws: WebSocket, message: any) {
@@ -196,11 +198,99 @@ function sendAnswer(ws: WebSocket, message: any) {
 
     if (peerList) {
         const peer = peerList.find(p => p.peerId === peerId);
-
         if (ws === peer?.ws) {
-            console.log(`${peer.peerName} is sending answer to host`)
             const host = sessionHosts.get(sessionId);
             host?.send(JSON.stringify({ type, peerId, sessionId, sdp }));
+            if (!host) {
+                console.log('Host socket not found');
+            }
         }
+    }
+}
+
+
+function handleChat(ws: WebSocket, message: any) {
+    const { type, text, sessionId, name, peerId, timestamp } = message;
+    console.log(message);
+
+    const host = sessionHosts.get(sessionId);
+    host?.send(JSON.stringify({
+        type,
+        text,
+        name,
+        timestamp,
+        peerId,
+        sessionId
+    }));
+
+    const peerList = peers.get(sessionId);
+    peerList?.forEach(peer => {
+        peer.ws.send(JSON.stringify({
+            type,
+            text,
+            name,
+            peerId,
+            sessionId,
+            timestamp
+        }))
+    })
+}
+
+function stopScreenShare(ws: WebSocket, message: any) {
+    const { type, trackId, sessionId } = message;
+    const peerList = peers.get(sessionId);
+
+    if (!peerList) return;
+
+    peerList.forEach(peer => {
+        peer.ws.send(JSON.stringify({
+            type,
+            trackId,
+            sessionId
+        }))
+    })
+}
+
+function handleSocketConnection(ws: WebSocket, message: any) {
+    if (message.from === 'peer') {
+        const { type, peerId, sessionId } = message;
+        let peerList = peers.get(sessionId);
+
+        if (!peerList) return;
+        const peer = peerList?.find(p => p.peerId === peerId);
+        peer?.ws.close();
+        peerList = peerList.filter(peer => peer.peerId !== peerId);
+        if (peerList.length > 0) {
+            peers.set(sessionId, peerList);
+        }
+        else {
+            peers.delete(sessionId);
+        }
+        const host = sessionHosts.get(sessionId);
+        host?.send(JSON.stringify({
+            type,
+            peerId,
+            sessionId
+        }));
+    }
+
+    if (message.from === 'host') {
+        const { sessionId } = message;
+        const peerList = peers.get(sessionId);
+
+        peerList?.forEach(peer => {
+            const { type, peerId, sessionId } = message;
+            peer.ws.send(JSON.stringify({
+                type,
+                peerId,
+                sessionId
+            }));
+            peer.ws.close();
+        });
+        peers.delete(sessionId);
+
+        const host = sessionHosts.get(sessionId);
+        host?.close();
+        sessionHosts.delete(sessionId);
     }
 }
